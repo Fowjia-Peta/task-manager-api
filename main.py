@@ -1,39 +1,76 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, Integer, String, Boolean
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
-app = FastAPI(title="Task Manager API")
+DATABASE_URL = "sqlite:///./tasks.db"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+Base = declarative_base()
 
 
-class Task(BaseModel):
+class TaskDB(Base):
+    __tablename__ = "tasks"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    done = Column(Boolean, default=False)
+
+
+Base.metadata.create_all(bind=engine)
+
+
+class TaskIn(BaseModel):
     title: str
     done: bool = False
 
 
-tasks: list[Task] = []
+class TaskOut(TaskIn):
+    id: int
+    model_config = {"from_attributes": True}
 
 
-@app.post("/tasks")
-def add_task(task: Task):
-    tasks.append(task)
-    return {"index": len(tasks) - 1, "task": task}
+app = FastAPI(title="Task Manager API")
 
 
-@app.get("/tasks")
-def get_tasks():
-    return tasks
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
-@app.put("/tasks/{index}")
-def update_task(index: int, task: Task):
-    if index < 0 or index >= len(tasks):
+@app.post("/tasks", response_model=TaskOut)
+def add_task(task: TaskIn, db: Session = Depends(get_db)):
+    db_task = TaskDB(title=task.title, done=task.done)
+    db.add(db_task)
+    db.commit()
+    db.refresh(db_task)
+    return db_task
+
+
+@app.get("/tasks", response_model=list[TaskOut])
+def get_tasks(db: Session = Depends(get_db)):
+    return db.query(TaskDB).all()
+
+
+@app.put("/tasks/{task_id}", response_model=TaskOut)
+def update_task(task_id: int, task: TaskIn, db: Session = Depends(get_db)):
+    db_task = db.get(TaskDB, task_id)
+    if db_task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    tasks[index] = task
-    return task
+    db_task.title = task.title
+    db_task.done = task.done
+    db.commit()
+    db.refresh(db_task)
+    return db_task
 
 
-@app.delete("/tasks/{index}")
-def delete_task(index: int):
-    if index < 0 or index >= len(tasks):
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: int, db: Session = Depends(get_db)):
+    db_task = db.get(TaskDB, task_id)
+    if db_task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    removed = tasks.pop(index)
-    return {"deleted": removed}
+    db.delete(db_task)
+    db.commit()
+    return {"deleted": task_id}
